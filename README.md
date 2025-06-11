@@ -57,18 +57,23 @@ Dependencies will be automatically installed on first run.
 ## Output Sections
 
 ### Cost Summary
+
 - **Actual cost**: What you paid after cache discounts
 - **Cache savings**: Amount saved due to 90% cache read discount
 - **Without cache cost**: What it would have cost without caching
 
 ### Token Breakdown
+
 Shows total tokens used with percentages for:
+
 - **Cached**: Tokens read from cache (90% discount)
 - **Cache write**: Tokens written to cache (25% premium)
 - **Output**: Generated tokens (most expensive)
 
 ### Project Breakdown
+
 Table showing for each project:
+
 - Total cost
 - Number of sessions
 - Active days
@@ -76,24 +81,29 @@ Table showing for each project:
 - Cache efficiency percentage
 
 ### Activity Patterns
+
 - **Hourly sparkline**: 24-hour activity distribution
 - **Daily bar chart**: Activity by day of week
 
 ### Tool Use Stats
+
 Shows how often Claude's suggestions were:
+
 - ✓ Accepted
 - ✗ Rejected/cancelled
 
 ## Pricing
 
 The script includes pricing for Claude models as of 2025:
+
 - **Claude 4 Opus**: $15/M input, $75/M output
-- **Claude 4 Sonnet**: $3/M input, $15/M output  
+- **Claude 4 Sonnet**: $3/M input, $15/M output
 - **Claude 3.5 Sonnet**: $3/M input, $15/M output
 - **Claude 3.5 Haiku**: $0.80/M input, $4/M output
 - **Claude 3 Haiku**: $0.25/M input, $1.25/M output
 
 Cache pricing:
+
 - **Cache write**: 25% more than input price
 - **Cache read**: 90% discount from input price
 
@@ -101,10 +111,11 @@ Cache pricing:
 
 - Python 3.9+
 - Access to `~/.claude/projects/*.jsonl` files
-- `uv` package manager (or manually install `rich` and `typer`)
+- [`uv` package manager](https://docs.astral.sh/uv/getting-started/installation/) (or manually install `rich` and `typer`)
 
 ## Notes
 
+- Inspired by https://gist.github.com/esc5221/df0a0c3c068b8dd92282837389addb35 (which stopped working many days ago)
 - Project names are automatically cleaned (removes $HOME prefix)
 - Handles both old (costUSD) and new (usage tokens) metadata formats
 - Only shows projects with costs > $0.01
