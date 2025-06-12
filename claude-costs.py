@@ -101,7 +101,7 @@ def calculate_token_cost(usage: dict, model: str) -> Tuple[float, float]:
     return actual_cost, cache_savings
 
 
-def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> Tuple[Dict, Dict, Dict, Dict, Dict, float]:
+def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> Tuple[Dict, Dict, Dict, Dict, Dict, float, Dict, Dict, Dict, List[float]]:
     """Parse all JSONL files and extract cost/usage data."""
     jsonl_files = glob.glob(str(project_dir / "**/*.jsonl"), recursive=True)
     
@@ -119,7 +119,8 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
         "sessions": set(),
         "tokens": {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0},
         "days": set(),
-        "messages": 0
+        "messages": 0,
+        "response_times": []  # Track response times per project
     })
     
     total_tokens = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
@@ -135,6 +136,9 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
         "accepted": 0,
         "interrupted": 0
     }
+    
+    # Response time tracking
+    response_times = []  # Global response times
     
     for file_path in jsonl_files:
         # Extract project name
@@ -180,6 +184,19 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
         
         session_id = Path(file_path).stem
         
+        # First pass: collect all messages by uuid for response time calculation
+        messages_by_uuid = {}
+        with open(file_path, 'r') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    uuid = entry.get("uuid")
+                    if uuid:
+                        messages_by_uuid[uuid] = entry
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        
+        # Second pass: process messages
         with open(file_path, 'r') as f:
             for line in f:
                 try:
@@ -224,6 +241,24 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
                                             tool_use_stats["accepted"] += 1
                                     else:
                                         tool_use_stats["accepted"] += 1
+                    
+                    # Calculate response time for assistant messages
+                    if entry.get("type") == "assistant":
+                        parent_uuid = entry.get("parentUuid")
+                        if parent_uuid and parent_uuid in messages_by_uuid:
+                            parent_msg = messages_by_uuid[parent_uuid]
+                            if parent_msg.get("type") == "user":
+                                # Calculate response time
+                                try:
+                                    user_time = datetime.fromisoformat(parent_msg["timestamp"].replace('Z', '+00:00'))
+                                    assistant_time = datetime.fromisoformat(entry["timestamp"].replace('Z', '+00:00'))
+                                    response_time = (assistant_time - user_time).total_seconds()
+                                    
+                                    if 0 < response_time < 300:  # Sanity check: between 0 and 5 minutes
+                                        response_times.append(response_time)
+                                        project_stats[project_name]["response_times"].append(response_time)
+                                except:
+                                    pass
                     
                     # Skip non-assistant messages for cost calculation
                     if entry.get("type") != "assistant":
@@ -306,7 +341,7 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
                     continue
     
     return (daily_costs, session_data, project_costs, total_tokens, project_stats, 
-            total_cache_savings, hourly_activity, daily_activity, tool_use_stats)
+            total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times)
 
 
 def format_tokens(num: int) -> str:
@@ -316,6 +351,21 @@ def format_tokens(num: int) -> str:
     elif num >= 1_000:
         return f"{num / 1_000:.1f}k"
     return str(num)
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable format."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        minutes = int(seconds / 60)
+        return f"{minutes}m"
+    else:
+        hours = int(seconds / 3600)
+        minutes = int((seconds % 3600) / 60)
+        if minutes > 0:
+            return f"{hours}h{minutes}m"
+        return f"{hours}h"
 
 
 def create_sparkline(values: List[float], width: int = 20) -> str:
@@ -371,9 +421,10 @@ def create_bar_chart(values: List[float], labels: List[str], max_width: int = 30
 
 @app.command()
 def main(
-    days: int = typer.Option(30, "--days", "-d", help="Number of days to analyze"),
+    days: int = typer.Option(90, "--days", "-d", help="Number of days to analyze"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed breakdown"),
     claude_dir: Path = typer.Option(None, "--claude-dir", "-c", help="Path to Claude directory", show_default="~/.claude"),
+    show_cache: bool = typer.Option(False, "--cache", help="Show cache statistics"),
 ):
     """Calculate Claude Code usage costs and statistics."""
     
@@ -395,7 +446,7 @@ def main(
     
     # Parse data with cutoff date
     (daily_costs, session_data, project_costs, total_tokens, project_stats, 
-     total_cache_savings, hourly_activity, daily_activity, tool_use_stats) = parse_jsonl_files(project_dir, cutoff_date)
+     total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times) = parse_jsonl_files(project_dir, cutoff_date)
     
     if not daily_costs:
         console.print("[yellow]No cost data found in JSONL files[/yellow]")
@@ -415,6 +466,20 @@ def main(
     avg_sessions_per_day = num_sessions / days if days > 0 else 0
     avg_cost_per_session = total_cost / num_sessions if num_sessions > 0 else 0
     
+    # Calculate average session duration
+    session_durations = []
+    for session in recent_sessions.values():
+        if session["start"] and session["end"]:
+            duration = (session["end"] - session["start"]).total_seconds()
+            if duration > 0:  # Only count sessions with actual duration
+                session_durations.append(duration)
+    
+    avg_duration = sum(session_durations) / len(session_durations) if session_durations else 0
+    
+    # Calculate average response time
+    avg_response_time = sum(response_times) / len(response_times) if response_times else 0
+    median_response_time = sorted(response_times)[len(response_times)//2] if response_times else 0
+    
     # Calculate token percentages
     total_all_tokens = sum(total_tokens.values())
     if total_all_tokens > 0:
@@ -426,22 +491,31 @@ def main(
     
     # Display summary
     console.print()
-    console.print(f"💰 ${total_cost:.2f} actual cost ({days} days)")
-    if total_cache_savings > 0.01:
+    console.print(f"💰 ${total_cost:.2f} API value (last {days} days, {active_days} with activity)")
+    if show_cache and total_cache_savings > 0.01:
         console.print(f"💸 ${total_cache_savings:.2f} saved from caching (${total_cost + total_cache_savings:.2f} without cache)")
-    console.print(f"📊 {num_sessions} sessions • ${avg_cost_per_session:.2f}/session • {active_days} active days")
+    avg_cost_per_day = total_cost / active_days if active_days > 0 else 0
+    console.print(f"📊 {num_sessions} sessions • ${avg_cost_per_session:.2f}/session • ${avg_cost_per_day:.2f}/day")
+    console.print(f"[dim]Note: This shows API value, not your actual subscription cost[/dim]")
+    if avg_response_time > 0:
+        console.print(f"⚡ Claude response time: {avg_response_time:.1f}s avg, {median_response_time:.1f}s median ({len(response_times):,} responses)")
     
-    # Build token display - only show non-zero percentages
-    token_parts = []
-    if cache_percent > 0.5:
-        token_parts.append(f"{cache_percent:.0f}% cached")
-    if cache_create_percent > 0.5:
-        token_parts.append(f"{cache_create_percent:.0f}% cache write")
-    if output_percent > 0.5:
-        token_parts.append(f"{output_percent:.0f}% output")
-    
-    token_breakdown = " / ".join(token_parts) if token_parts else "no token breakdown available"
-    console.print(f"🔤 {format_tokens(total_all_tokens)} tokens ({token_breakdown})", highlight=False)
+    # Build token display
+    if show_cache:
+        # Show detailed breakdown with cache info
+        token_parts = []
+        if cache_percent > 0.5:
+            token_parts.append(f"{cache_percent:.0f}% cached")
+        if cache_create_percent > 0.5:
+            token_parts.append(f"{cache_create_percent:.0f}% cache write")
+        if output_percent > 0.5:
+            token_parts.append(f"{output_percent:.0f}% output")
+        
+        token_breakdown = " / ".join(token_parts) if token_parts else "no token breakdown available"
+        console.print(f"🔤 {format_tokens(total_all_tokens)} tokens ({token_breakdown})", highlight=False)
+    else:
+        # Simple token count
+        console.print(f"🔤 {format_tokens(total_all_tokens)} tokens total")
     
     # Always show project breakdown
     console.print("\n[bold]Project Breakdown:[/bold]")
@@ -450,8 +524,10 @@ def main(
     table.add_column("Cost", justify="right", style="green")
     table.add_column("Sessions", justify="right", style="yellow")
     table.add_column("Days", justify="right", style="magenta")
+    table.add_column("Resp Time", justify="right", style="cyan")
     table.add_column("Tokens", justify="right", style="blue")
-    table.add_column("Cache%", justify="right", style="dim")
+    if show_cache:
+        table.add_column("Cache%", justify="right", style="dim")
     
     # Filter and sort projects by cost
     sorted_projects = []
@@ -461,11 +537,27 @@ def main(
             project_total_tokens = sum(stats["tokens"].values())
             cache_percent = (stats["tokens"]["cache_read"] / project_total_tokens * 100) if project_total_tokens > 0 else 0
             
+            # Calculate average session duration for this project
+            project_durations = []
+            for session_id in stats["sessions"]:
+                if session_id in session_data:
+                    session = session_data[session_id]
+                    if session["start"] and session["end"]:
+                        duration = (session["end"] - session["start"]).total_seconds()
+                        if duration > 0:
+                            project_durations.append(duration)
+            
+            avg_project_duration = sum(project_durations) / len(project_durations) if project_durations else 0
+            
+            # Calculate average response time for this project
+            avg_project_response_time = sum(stats["response_times"]) / len(stats["response_times"]) if stats["response_times"] else 0
+            
             sorted_projects.append((
                 project_name,
                 stats["cost"],
                 len(stats["sessions"]),
                 len(stats["days"]),
+                avg_project_response_time,
                 project_total_tokens,
                 cache_percent
             ))
@@ -474,15 +566,18 @@ def main(
     
     # Show top projects (or all if verbose)
     limit = None if verbose else 10
-    for project, cost, sessions, days, tokens, cache_pct in sorted_projects[:limit]:
-        table.add_row(
+    for project, cost, sessions, days, resp_time, tokens, cache_pct in sorted_projects[:limit]:
+        row_data = [
             project,
             f"${cost:.2f}",
             str(sessions),
             str(days),
-            format_tokens(tokens),
-            f"{cache_pct:.0f}%"
-        )
+            f"{resp_time:.1f}s" if resp_time > 0 else "-",
+            format_tokens(tokens)
+        ]
+        if show_cache:
+            row_data.append(f"{cache_pct:.0f}%")
+        table.add_row(*row_data)
     
     console.print(table)
     
