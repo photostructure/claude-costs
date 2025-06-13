@@ -101,7 +101,7 @@ def calculate_token_cost(usage: dict, model: str) -> Tuple[float, float]:
     return actual_cost, cache_savings
 
 
-def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> Tuple[Dict, Dict, Dict, Dict, Dict, float, Dict, Dict, Dict, List[float]]:
+def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> Tuple[Dict, Dict, Dict, Dict, Dict, float, Dict, Dict, Dict, List[float], Dict, Dict]:
     """Parse all JSONL files and extract cost/usage data."""
     jsonl_files = glob.glob(str(project_dir / "**/*.jsonl"), recursive=True)
     
@@ -129,6 +129,7 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
     # Time-based analytics
     hourly_activity = defaultdict(int)
     daily_activity = defaultdict(int)
+    daily_message_counts = defaultdict(int)  # Messages per calendar day
     
     # Tool use metrics
     tool_use_stats = {
@@ -139,6 +140,7 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
     
     # Response time tracking
     response_times = []  # Global response times
+    daily_response_times = defaultdict(list)  # Response times by date for sparkline
     
     for file_path in jsonl_files:
         # Extract project name
@@ -257,6 +259,10 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
                                     if 0 < response_time < 300:  # Sanity check: between 0 and 5 minutes
                                         response_times.append(response_time)
                                         project_stats[project_name]["response_times"].append(response_time)
+                                        # Track by date for sparkline
+                                        response_date = assistant_time.date()
+                                        if not cutoff_date or response_date >= cutoff_date:
+                                            daily_response_times[response_date].append(response_time)
                                 except:
                                     pass
                     
@@ -293,6 +299,7 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
                     # Track time-based activity
                     hourly_activity[timestamp.hour] += 1
                     daily_activity[timestamp.weekday()] += 1
+                    daily_message_counts[date] += 1
                     
                     # Check for old format (costUSD)
                     if "costUSD" in entry:
@@ -341,7 +348,8 @@ def parse_jsonl_files(project_dir: Path, cutoff_date: datetime.date = None) -> T
                     continue
     
     return (daily_costs, session_data, project_costs, total_tokens, project_stats, 
-            total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times)
+            total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times, 
+            daily_response_times, daily_message_counts)
 
 
 def format_tokens(num: int) -> str:
@@ -446,7 +454,8 @@ def main(
     
     # Parse data with cutoff date
     (daily_costs, session_data, project_costs, total_tokens, project_stats, 
-     total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times) = parse_jsonl_files(project_dir, cutoff_date)
+     total_cache_savings, hourly_activity, daily_activity, tool_use_stats, response_times, 
+     daily_response_times, daily_message_counts) = parse_jsonl_files(project_dir, cutoff_date)
     
     if not daily_costs:
         console.print("[yellow]No cost data found in JSONL files[/yellow]")
@@ -476,9 +485,15 @@ def main(
     
     avg_duration = sum(session_durations) / len(session_durations) if session_durations else 0
     
-    # Calculate average response time
+    # Calculate response time statistics
     avg_response_time = sum(response_times) / len(response_times) if response_times else 0
-    median_response_time = sorted(response_times)[len(response_times)//2] if response_times else 0
+    if response_times:
+        sorted_times = sorted(response_times)
+        median_response_time = sorted_times[len(sorted_times)//2]
+        p95_response_time = sorted_times[int(len(sorted_times) * 0.95)]
+        p99_response_time = sorted_times[int(len(sorted_times) * 0.99)]
+    else:
+        median_response_time = p95_response_time = p99_response_time = 0
     
     # Calculate token percentages
     total_all_tokens = sum(total_tokens.values())
@@ -497,8 +512,6 @@ def main(
     avg_cost_per_day = total_cost / active_days if active_days > 0 else 0
     console.print(f"📊 {num_sessions} sessions • ${avg_cost_per_session:.2f}/session • ${avg_cost_per_day:.2f}/day")
     console.print(f"[dim]Note: This shows API value, not your actual subscription cost[/dim]")
-    if avg_response_time > 0:
-        console.print(f"⚡ Claude response time: {avg_response_time:.1f}s avg, {median_response_time:.1f}s median ({len(response_times):,} responses)")
     
     # Build token display
     if show_cache:
@@ -566,12 +579,12 @@ def main(
     
     # Show top projects (or all if verbose)
     limit = None if verbose else 10
-    for project, cost, sessions, days, resp_time, tokens, cache_pct in sorted_projects[:limit]:
+    for project, cost, sessions, project_days, resp_time, tokens, cache_pct in sorted_projects[:limit]:
         row_data = [
             project,
             f"${cost:.2f}",
             str(sessions),
-            str(days),
+            str(project_days),
             f"{resp_time:.1f}s" if resp_time > 0 else "-",
             format_tokens(tokens)
         ]
@@ -596,12 +609,73 @@ def main(
         console.print(f"         {''.join(['↑' if h % 6 == 0 else ' ' for h in range(24)])}")
         console.print(f"         {'0':>1}{'6':>6}{'12':>6}{'18':>6}")
     
+    # Daily activity sparkline
+    if daily_message_counts:
+        # Get dates for the period
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days-1)
+        
+        # Create values for each day in the period
+        daily_values = []
+        current_date = start_date
+        while current_date <= end_date:
+            daily_values.append(daily_message_counts.get(current_date, 0))
+            current_date += timedelta(days=1)
+        
+        if any(daily_values):
+            # Use fixed width for consistent display
+            sparkline_width = min(len(daily_values), 30)
+            sparkline = create_sparkline(daily_values, width=sparkline_width)
+            console.print(f"\nDaily:   {sparkline} (last {days} days, {sum(1 for v in daily_values if v > 0)} active)")
+            # Add markers for start, middle and end
+            if sparkline_width >= 20:
+                # Three markers for longer sparklines
+                mid_pos = sparkline_width // 2
+                console.print(f"         ↑{' ' * (mid_pos-1)}↑{' ' * (sparkline_width-mid_pos-2)}↑")
+                start_label = f"{days}d ago"
+                mid_label = f"{days//2}d"
+                console.print(f"         {start_label:<{mid_pos}}{mid_label:^{sparkline_width-mid_pos-5}}{'today':>5}")
+            else:
+                # Two markers for shorter sparklines
+                console.print(f"         ↑{' ' * (sparkline_width-2)}↑")
+                start_label = f"{days}d"
+                console.print(f"         {start_label:<{sparkline_width//2}}{'today':>{sparkline_width-sparkline_width//2}}")
+    
+    # Response time distribution sparkline
+    if response_times:
+        # Create buckets for response times (0-30s in 1s intervals)
+        response_buckets = defaultdict(int)
+        max_bucket = 30  # Cap at 30 seconds for display
+        
+        for resp_time in response_times:
+            bucket = min(int(resp_time), max_bucket - 1)
+            response_buckets[bucket] += 1
+        
+        # Create values for each bucket
+        bucket_values = [response_buckets.get(i, 0) for i in range(max_bucket)]
+        
+        # Find the last non-zero bucket for better display
+        last_bucket = max_bucket
+        for i in range(max_bucket - 1, -1, -1):
+            if bucket_values[i] > 0:
+                last_bucket = min(i + 3, max_bucket)  # Show a bit past the last value
+                break
+        
+        # Trim to meaningful range
+        bucket_values = bucket_values[:last_bucket]
+        
+        if any(bucket_values):
+            sparkline = create_sparkline(bucket_values, width=min(len(bucket_values), 30))
+            console.print(f"\nResponse: {sparkline} (p50: {median_response_time:.0f}s, p95: {p95_response_time:.0f}s, p99: {p99_response_time:.0f}s)")
+            console.print(f"          {'↑':>1}{'↑':>{len(sparkline)//2}}{'↑':>{len(sparkline)-len(sparkline)//2-1}}")
+            console.print(f"          {'0s':>2}{f'{last_bucket//2}s':>{len(sparkline)//2}}{f'{last_bucket}s':>{len(sparkline)-len(sparkline)//2-2}}")
+    
     # Day of week bar chart
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     daily_values = [daily_activity.get(i, 0) for i in range(7)]
     if any(daily_values):
         console.print("\nDaily distribution:")
-        bar_lines = create_bar_chart(daily_values, days, max_width=25)
+        bar_lines = create_bar_chart(daily_values, weekdays, max_width=25)
         for line in bar_lines:
             console.print(f"  {line}")
     
