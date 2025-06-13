@@ -124,16 +124,17 @@ Cache pricing:
 ## Example Output
 
 ```
-💰 $1566.54 actual cost (7 days)
-💸 $6380.16 saved from caching ($7946.70 without cache)
-📊 77 sessions • $20.34/session • 8 active days
-🔤 612.8M tokens (92% cached / 8% cache write)
+💰 $123.45 actual cost (7 days)
+💸 $456.78 saved from caching ($580.23 without cache)
+📊 42 sessions • $2.94/session • 6 active days
+🔤 89.1M tokens (91% cached / 9% cache write)
 
 Project Breakdown:
   Project                       Cost   Sessions   Days   Tokens   Cache%
  ────────────────────────────────────────────────────────────────────────
-  src/node-sqlite            $622.02         33      8   265.0M      93%
-  src/photostructure         $416.05         15      6   155.3M      90%
+  my-web-app                  $45.67         18      5    38.5M      92%
+  backend-api                 $32.15         12      4    27.3M      89%
+  data-analysis               $28.91          8      3    15.2M      94%
   ...
 
 Activity Patterns:
@@ -148,7 +149,7 @@ Daily distribution:
   ...
 
 Tool Use Stats:
-  Total tool uses: 1,234
-  ✓ Accepted: 1,185 (96.0%)
-  ✗ Rejected: 49 (4.0%)
+  Total tool uses: 567
+  ✓ Accepted: 542 (95.6%)
+  ✗ Rejected: 25 (4.4%)
 ```
